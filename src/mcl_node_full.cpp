@@ -10,6 +10,7 @@
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
 #include "nav_msgs/msg/odometry.hpp"
+#include "geometry_msgs/msg/twist.hpp"
 
 #include "tf2_ros/transform_broadcaster.h"  
 #include "tf2_ros/buffer.h"
@@ -65,7 +66,7 @@ public :
     inline double getDeltaYSum(void) { return deltaYSum_; }
     inline double getDeltaDistSum(void) { return deltaDistSum_; }
     inline double getDeltaYawSum(void) { return deltaYawSum_; }
-    inline bool getUseOmniDirectionalModel(void) { return useOmniDirectionalModel_; }
+
     inline std::vector<double> getOdomNoiseDDM(void) { return odomNoiseDDM_; }
     inline Pose getMCLPose(void) { return mclPose_; }
     inline Pose getBaseLink2Laser(void) { return baseLink2Laser_; }
@@ -79,6 +80,7 @@ public :
     
     MCL_Node(): 
         Node("MCL_Node_Run"),
+
         scanName_("/scan"),
         odomName_("/odom"),
         mapName_("/map"),
@@ -91,6 +93,7 @@ public :
         mapFrame_("map"),
         odomFrame_("odom"),
         useOdomFrame_(true),
+
         initialPose_({0.0, 0.0, 0.0}),
         particlesNum_(3000),
         initialNoise_({0.2, 0.2, 0.02}),
@@ -98,16 +101,20 @@ public :
         addRandomParticlesInResampling_(true),
         randomParticlesRate_(0.1),
         randomParticlesNoise_({0.1, 0.1, 0.01}),
-        odomNoiseDDM_({1.0, 0.5, 0.4, 0.1}),
-        odomNoiseODM_({1.0, 0.5, 0.5, 0.5, 1.0, 0.5, 0.5, 0.5, 1.0}),
+
+        odomNoiseDDM_({0.4, 0.2, 0.4, 0.2}),
+
         deltaXSum_(0.0),
         deltaYSum_(0.0),
         deltaDistSum_(0.0),
         deltaYawSum_(0.0),
         deltaTimeSum_(0.0),
         resampleThresholds_({-1.0, -1.0, -1.0, -1.0, -1.0}),
-        useOmniDirectionalModel_(false),
+
+
         useOdomMsg_(true),
+        use_cmd_vel_(true),
+
         measurementModelType_(0),
         pKnownPrior_(0.5),
         pUnknownPrior_(0.5),
@@ -117,7 +124,7 @@ public :
         zMax_(0.05),
         zRand_(0.05),
         varHit_(0.1),
-        lambdaShort_(3.0),
+        lambdaShort_(3.0),  // change
         lambdaUnknown_(1.0),
         alphaSlow_(0.001),
         alphaFast_(0.9),
@@ -133,8 +140,8 @@ public :
         failureCntThreshold_(10),
         useEstimationResetting_(false),
         localizationHz_(10.0),
-        performGlobalLocalization_(false),
-        broadcastTF_(true),
+        performGlobalLocalization_(false),   // test   // every paramete here need to tune!!!!
+        broadcastTF_(true), 
         gotMap_(false),
         gotScan_(false),
         isInitialized_(true),
@@ -158,11 +165,14 @@ public :
         initialPoseSub_ = this->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
             "/initialpose", 1, std::bind(&MCL_Node::initialPoseCB, this, std::placeholders::_1));
 
+        cmd_vel_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
+            "/cmd_vel", 10, std::bind(&MCL_Node::cmd_vel_CB, this, std::placeholders::_1));
+
         // Set up publishers
         posePub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
             poseName_, 1);
         particlesPub_ = this->create_publisher<geometry_msgs::msg::PoseArray>(
-            particlesName_, 1);
+            particlesName_, 1); 
         unknownScanPub_ = this->create_publisher<sensor_msgs::msg::LaserScan>(
             unknownScanName_, 1);
         residualErrorsPub_ = this->create_publisher<sensor_msgs::msg::LaserScan>(
@@ -219,62 +229,65 @@ public :
         baseLink2Laser_.setX(x);
         baseLink2Laser_.setY(y);
         baseLink2Laser_.setYaw(yaw);
+    }
+    double normalize(double z)
+    {
+        return atan2(sin(z), cos(z));
+    }
+    double pf_ran_gaussian(double sigma){
+        double x1, x2, w, r;
 
-        // int mapFailedCnt = 0;
-        // while (rclcpp::ok()){
-        //     std::this_thread::sleep_for(std::chrono::milliseconds(1000)); // Sleep for 100 milliseconds before publishing again
-        //     if (gotMap_)
-        //         break;
-        //     mapFailedCnt++;
-        //     if (mapFailedCnt >= 50) {
-        //         RCLCPP_ERROR(this->get_logger(), "Cannot get a map message.");
-        //         RCLCPP_ERROR(this->get_logger(), "Did you publish the map? Expected map topic name is: %s", mapName_.c_str());
-        //         exit(1);
-        //     }
-        // }
-        // int scanFailedCnt = 0;
-        // while (rclcpp::ok()){
-        //     if (gotScan_)
-        //         break;
-        //     scanFailedCnt++;
-        //     if (scanFailedCnt >= 100) {
-        //         RCLCPP_ERROR(this->get_logger(), "Cannot get a scan message.");
-        //         exit(1);
-        //     }
-        //     std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Sleep for 100 milliseconds before publishing again
-        // }
-        //     // reset particles distribution
-        // if (performGlobalLocalization_)
-        //     resetParticlesDistributionGlobally();
-        // else
-        //     resetParticlesDistribution();
-        // resampleIndices_.resize(particlesNum_);
-        //         // measurement model
-        // normConstHit_ = 1.0 / sqrt(2.0 * varHit_ * M_PI);
-        // denomHit_ = 1.0 / (2.0 * varHit_);
-        // pRand_ = 1.0 / (scan_->range_max / mapResolution_);
-        // measurementModelRandom_ = zRand_ * pRand_;
-        // measurementModelInvalidScan_ = zMax_ + zRand_ * pRand_;
+        do {
+            do {
+            r = drand48();
+            } while (r == 0.0);
+            x1 = 2.0 * r - 1.0;
+            do {
+            r = drand48();
+            } while (r == 0.0);
+            x2 = 2.0 * r - 1.0;
+            w = x1 * x1 + x2 * x2;
+        } while (w > 1.0 || w == 0.0);
 
-        // isInitialized_ = true;
-        // if (!useOdomMsg_)
-        //     isInitialized_ = false;
-        RCLCPP_INFO(this->get_logger(), "MCL ready to localize");
+        return sigma * x2 * sqrt(-2.0 * log(w) / w);
+    }
 
+    double angle_diff(double a, double b)
+    {
+        a = normalize(a);
+        b = normalize(b);
+        double d1 = a - b;
+        double d2 = 2 * M_PI - fabs(d1);
+        if (d1 > 0) {
+            d2 *= -1.0;
+        }
+        if (fabs(d1) < fabs(d2)) {
+            return d1;
+        } else {
+            return d2;
+        }
     }
 
     void updateParticlesByMotionModel(void) {
         double deltaX, deltaY, deltaDist, deltaYaw;
+
+        double dx, dy;
         if (useOdomMsg_) {
-            deltaX = deltaX_;
-            deltaY = deltaY_;
-            deltaDist = deltaDist_;
-            deltaYaw = deltaYaw_;
-            deltaX_ = deltaY_ = deltaDist_ = deltaYaw_ = 0.0;
+
+            deltaDist = deltaDist_ * (1/localizationHz_ ) ;
+            deltaYaw = deltaYaw_ * (1/localizationHz_ ) ;
+
+            double old_yaw = mclPose_.getYaw();
+
+            dx = deltaDist * cos(old_yaw);
+            dy = deltaDist * sin(old_yaw);
+            
+            // reset
+            deltaDist_ = deltaYaw_ = deltaDist = 0.0;
         } else {
             // estimate robot's moving using the linear interpolation of the estimated pose
-            double dx = mclPose_.getX() - prevMCLPose_.getX();
-            double dy = mclPose_.getY() - prevMCLPose_.getY();
+            dx = mclPose_.getX() - prevMCLPose_.getX();
+            dy = mclPose_.getY() - prevMCLPose_.getY();
             double dyaw = mclPose_.getYaw() - prevMCLPose_.getYaw();
             while (dyaw < -M_PI)
                 dyaw += 2.0 * M_PI;
@@ -290,62 +303,116 @@ public :
             prevMCLPose_ = mclPose_;
 
             // calculate odometry
-            if (!useOmniDirectionalModel_) {
-                double t = odomPose_.getYaw() + deltaYaw / 2.0;
-                double x = odomPose_.getX() + deltaDist * cos(t);
-                double y = odomPose_.getY() + deltaDist * sin(t);
-                double yaw = odomPose_.getYaw() + deltaYaw;
-                odomPose_.setPose(x, y, yaw);
-            } else {
-                double t = odomPose_.getYaw() + deltaYaw / 2.0;
-                double x = odomPose_.getX() + deltaX * cos(t) + deltaY * cos(t + M_PI / 2.0f);
-                double y = odomPose_.getY() + deltaX * sin(t) + deltaY * sin(t + M_PI / 2.0f);;
-                double yaw = odomPose_.getYaw() + deltaYaw;
-                odomPose_.setPose(x, y, yaw);
-            }
+            t = odomPose_.getYaw() + deltaYaw / 2.0;
+            double x = odomPose_.getX() + deltaDist * cos(t);
+            double y = odomPose_.getY() + deltaDist * sin(t);
+            double yaw = odomPose_.getYaw() + deltaYaw;
+            odomPose_.setPose(x, y, yaw);
         }
-        deltaXSum_ += fabs(deltaX);
-        deltaYSum_ += fabs(deltaY);
+
+        // if (cmd_vel_){
+        //     double linear_velocity = cmd_vel_->linear.x;  // Assuming motion in x direction
+        //     double angular_velocity = cmd_vel_->angular.z;  // Assuming yaw rotation around z-axis
+
+        //     // Compute deltaDist and deltaYaw
+        //     double delta_t = 0.1;  // Example time step, adjust based on your update rate
+        //     deltaX_ = linear_velocity * delta_t;
+        //     deltaYaw_ = angular_velocity * delta_t;
+
+        // }
+
         deltaDistSum_ += fabs(deltaDist);
         deltaYawSum_ += fabs(deltaYaw);
 
-        if (!useOmniDirectionalModel_) {
-            // differential drive model
-            double dist2 = deltaDist * deltaDist;
-            double yaw2 = deltaYaw * deltaYaw;
-            double distRandVal = dist2 * odomNoiseDDM_[0] + yaw2 * odomNoiseDDM_[1];
-            double yawRandVal = dist2 * odomNoiseDDM_[2] + yaw2 * odomNoiseDDM_[3];
-            for (int i = 0; i < particlesNum_; ++i) {
-                double ddist = deltaDist + nrand(distRandVal);
-                double dyaw = deltaYaw + nrand(yawRandVal);
-                double yaw = particles_[i].getYaw();
-                double t = yaw + dyaw / 2.0;
-                double x = particles_[i].getX() + ddist * cos(t);
-                double y = particles_[i].getY() + ddist * sin(t);
-                yaw += dyaw;
-                particles_[i].setPose(x, y, yaw);
-            }
+
+          // Implement sample_motion_odometry (Prob Rob p 136)
+        double alpha1_ = 0.2;
+        double alpha2_ = 0.2;
+        double alpha3_ = 0.2;
+        double alpha4_ = 0.2; 
+
+        double delta_rot1, delta_trans, delta_rot2;
+        double delta_rot1_hat, delta_trans_hat, delta_rot2_hat;
+        double delta_rot1_noise, delta_rot2_noise;
+
+        double old_yaw = mclPose_.getYaw();
+
+          // Avoid computing a bearing from two poses that are extremely near each
+        // other (happens on in-place rotation).
+        if (sqrt(
+            dx * dx +
+            dy * dy) < 0.01)
+        {
+            delta_rot1 = 0.0;
         } else {
-            // omni directional model
-            double x2 = deltaX * deltaX;
-            double y2 = deltaY * deltaY;
-            double yaw2 = deltaYaw * deltaYaw;
-            double xRandVal = x2 * odomNoiseODM_[0] + y2 * odomNoiseODM_[1] + yaw2 * odomNoiseODM_[2];
-            double yRandVal = x2 * odomNoiseODM_[3] + y2 * odomNoiseODM_[4] + yaw2 * odomNoiseODM_[5];
-            double yawRandVal = x2 * odomNoiseODM_[6] + y2 * odomNoiseODM_[7] + yaw2 * odomNoiseODM_[8];
-            for (int i = 0; i < particlesNum_; ++i) {
-                double dx = deltaX + nrand(xRandVal);
-                double dy = deltaY + nrand(yRandVal);
-                double dyaw = deltaYaw + nrand(yawRandVal);
-                double yaw = particles_[i].getYaw();
-                double t = yaw + dyaw / 2.0;
-                double x = particles_[i].getX() + dx * cos(t) + dy * cos(t + M_PI / 2.0f);
-                double y = particles_[i].getY() + dx * sin(t) + dy * sin(t + M_PI / 2.0f);;
-                yaw += dyaw;
-                particles_[i].setPose(x, y, yaw);
-            }
+            delta_rot1 = angle_diff(
+            atan2(dx, dy),
+            old_yaw);
         }
+        delta_trans = sqrt(
+            dx * dx +
+            dy * dy);
+        delta_rot2 = angle_diff(deltaYaw, delta_rot1);
+
+        // We want to treat backward and forward motion symmetrically for the
+        // noise model to be applied below.  The standard model seems to assume
+        // forward motion.
+        delta_rot1_noise = std::min(
+            fabs(angle_diff(delta_rot1, 0.0)),
+            fabs(angle_diff(delta_rot1, M_PI)));
+        delta_rot2_noise = std::min(
+            fabs(angle_diff(delta_rot2, 0.0)),
+            fabs(angle_diff(delta_rot2, M_PI)));
+
+        for (int i = 0; i < particlesNum_; ++i) {
+
+            // Sample pose differences
+            delta_rot1_hat = angle_diff(
+            delta_rot1,
+            pf_ran_gaussian(
+                sqrt(
+                alpha1_ * delta_rot1_noise * delta_rot1_noise +
+                alpha2_ * delta_trans * delta_trans)));
+            delta_trans_hat = delta_trans -
+            pf_ran_gaussian(
+            sqrt(
+                alpha3_ * delta_trans * delta_trans +
+                alpha4_ * delta_rot1_noise * delta_rot1_noise +
+                alpha4_ * delta_rot2_noise * delta_rot2_noise));
+            delta_rot2_hat = angle_diff(
+            delta_rot2,
+            pf_ran_gaussian(
+                sqrt(
+                alpha1_ * delta_rot2_noise * delta_rot2_noise +
+                alpha2_ * delta_trans * delta_trans)));
+
+            double x = particles_[i].getX() + delta_trans_hat *
+                cos(particles_[i].getYaw() + delta_rot1_hat);
+            double y = particles_[i].getY() + delta_trans_hat *
+                sin(particles_[i].getYaw() + delta_rot1_hat);
+            double yaw = particles_[i].getYaw() + delta_rot1_hat + delta_rot2_hat;
+
+
+            particles_[i].setPose(x, y, yaw);
+        }
+        // differential drive model
+        // double dist2 = deltaDist * deltaDist;
+        // double yaw2 = deltaYaw * deltaYaw;
+        // double distRandVal = dist2 * odomNoiseDDM_[0] + yaw2 * odomNoiseDDM_[1];
+        // double yawRandVal = dist2 * odomNoiseDDM_[2] + yaw2 * odomNoiseDDM_[3];
+        // for (int i = 0; i < particlesNum_; ++i) {
+        //     double ddist = deltaDist + nrand(distRandVal);
+        //     double dyaw = deltaYaw + nrand(yawRandVal);
+        //     double yaw = particles_[i].getYaw();
+        //     double t = yaw + dyaw / 2.0;
+        //     double x = particles_[i].getX() + ddist * cos(t);
+        //     double y = particles_[i].getY() + ddist * sin(t);
+        //     yaw += dyaw;
+        //     particles_[i].setPose(x, y, yaw);
+        // }
     }
+    
+
 
     void calculateLikelihoodsByMeasurementModel(void) {
         if (rejectUnknownScan_ && (measurementModelType_ == 0 || measurementModelType_ == 1))
@@ -821,6 +888,7 @@ private :
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odomSub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr mapSub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr initialPoseSub_;
+    rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
 
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr posePub_;
     rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr particlesPub_;
@@ -841,6 +909,7 @@ private :
     // frames
     std::string laserFrame_, baseLinkFrame_, mapFrame_, odomFrame_;
     bool useOdomFrame_;
+    bool use_cmd_vel_;
 
     std::vector<double> initialPose_;
     Pose mclPose_, prevMCLPose_, baseLink2Laser_, odomPose_;
@@ -867,8 +936,9 @@ private :
     double deltaXSum_, deltaYSum_, deltaDistSum_, deltaYawSum_, deltaTimeSum_;
     std::vector<double> resampleThresholds_;
     std::vector<double> odomNoiseDDM_, odomNoiseODM_;
-    bool useOmniDirectionalModel_;
+
     bool useOdomMsg_;
+    geometry_msgs::msg::Twist::SharedPtr cmd_vel_;
 
     // measurements
     sensor_msgs::msg::LaserScan::SharedPtr scan_, unknownScan_;
@@ -982,17 +1052,6 @@ private :
             isInitialized_ = false;
             return;
         }
-        // odomPoseStamp_ = msg->header.stamp;
-        double deltaTime = currTime - prevTime;
-        deltaX_ += msg->twist.twist.linear.x * deltaTime;
-        deltaY_ += msg->twist.twist.linear.y * deltaTime;
-        deltaDist_ += msg->twist.twist.linear.x * deltaTime;
-        deltaYaw_ += msg->twist.twist.angular.z * deltaTime;
-        while (deltaYaw_ < -M_PI)
-            deltaYaw_ += 2.0 * M_PI;
-        while (deltaYaw_ > M_PI)
-            deltaYaw_ -= 2.0 * M_PI;
-        deltaTimeSum_ += deltaTime;
 
         tf2::Quaternion q(
             msg->pose.pose.orientation.x,
@@ -1004,6 +1063,14 @@ private :
         tf2::Matrix3x3 m(q);
         m.getRPY(roll, pitch, yaw);
         odomPose_.setPose(msg->pose.pose.position.x, msg->pose.pose.position.y, yaw);
+        // test here
+        double deltaTime = currTime - prevTime;
+        deltaX_ = msg->twist.twist.linear.x;
+        deltaY_ = msg->twist.twist.linear.y;
+        deltaDist_ = msg->twist.twist.linear.x;
+        deltaYaw_ = msg->twist.twist.angular.z;
+
+        deltaTimeSum_ += deltaTime;
 
         prevTime = currTime;
     }
@@ -1073,6 +1140,10 @@ private :
         }
         distMap_ = distMap;
         gotMap_ = true;
+    }
+
+    void cmd_vel_CB(const geometry_msgs::msg::Twist::SharedPtr msg){
+        cmd_vel_ = msg;
     }
 
     void initialPoseCB(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg)
